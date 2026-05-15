@@ -5,11 +5,40 @@ const qrcode = require("qrcode-terminal");
 const QRCode = require("qrcode");
 const fs = require("fs");
 const path = require("path");
-// 62539723477174 / 2348037361123
-// 184219854721155 / 13167493992
+
+function loadEnvFile() {
+  try {
+    const envRaw = fs.readFileSync(path.join(__dirname, ".env"), "utf8");
+    for (const line of envRaw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+
+      const equalsIndex = trimmed.indexOf("=");
+      if (equalsIndex === -1) continue;
+
+      const key = trimmed.slice(0, equalsIndex).trim();
+      let value = trimmed.slice(equalsIndex + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+
+      if (key && process.env[key] === undefined) {
+        process.env[key] = value;
+      }
+    }
+  } catch {
+    // .env is optional; deployed environments can provide real env vars.
+  }
+}
+
+loadEnvFile();
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const NOTIFICATION_NUMBER = "13126476896@c.us";
+const MY_NUMBER = "13129146461@c.us";
 const PREFIX = "818ai";
 const PREFIX1 = "818";
 const TEXT_MODEL = "openai/gpt-oss-120b";
@@ -19,11 +48,13 @@ const STARTUP_TIMEOUT_MS = 45000;
 const SESSION_LOAD_TIMEOUT_MS = 180000;
 const PORT = process.env.PORT || 3003;
 const numbersAllowed = [
-  "62539723477174",
-  "184219854721155",
-  "13167493992",
-  "2348037361123",
-];
+  process.env.NUM_10,
+  process.env.NUM_11,
+  process.env.NUM_12,
+  process.env.NUM_20,
+  process.env.NUM_21,
+  process.env.NUM_22,
+].filter(Boolean);
 
 // ─── State ───────────────────────────────────────────────────────────────────
 const replyMap = new Map();
@@ -615,6 +646,92 @@ app.get("/", (req, res) => {
       border-color: rgba(200,245,102,0.55);
     }
 
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(0, 0, 0, 0.72);
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal {
+      width: 100%;
+      max-width: 380px;
+      background: var(--surface);
+      border: 1px solid var(--border-bright);
+      border-radius: 8px;
+      padding: 24px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+    }
+
+    .modal-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 10px;
+    }
+
+    .modal-copy {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.7;
+      color: #a0a0a0;
+      margin-bottom: 22px;
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .modal-cancel-btn,
+    .modal-disconnect-btn {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      border-radius: 6px;
+      padding: 8px 12px;
+      cursor: pointer;
+      letter-spacing: 0.04em;
+      transition: all 0.2s;
+    }
+
+    .modal-cancel-btn {
+      color: var(--text);
+      background: none;
+      border: 1px solid var(--border-bright);
+    }
+
+    .modal-cancel-btn:hover {
+      border-color: #4a4a4a;
+      background: rgba(255,255,255,0.04);
+    }
+
+    .modal-disconnect-btn {
+      color: #0a0a0a;
+      background: var(--red);
+      border: 1px solid var(--red);
+      font-weight: 700;
+    }
+
+    .modal-disconnect-btn:hover {
+      background: #ff7474;
+      border-color: #ff7474;
+    }
+
+    .modal-disconnect-btn:disabled,
+    .modal-cancel-btn:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(8px); }
       to   { opacity: 1; transform: translateY(0); }
@@ -644,8 +761,19 @@ app.get("/", (req, res) => {
     <div class="card-footer">
       <div class="footer-msg" id="footerMsg">Waiting for WhatsApp client</div>
       <button class="connect-btn" id="connectBtn" onclick="connectWhatsApp()">Connect</button>
-      <button class="disconnect-btn" id="disconnectBtn" onclick="disconnectWhatsApp()">Disconnect</button>
+      <button class="disconnect-btn" id="disconnectBtn" onclick="openDisconnectModal()">Disconnect</button>
       <button class="refresh-btn" onclick="forceRefresh()">↻ Refresh</button>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="disconnectModal" role="dialog" aria-modal="true" aria-labelledby="disconnectModalTitle">
+    <div class="modal">
+      <div class="modal-title" id="disconnectModalTitle">Disconnect WhatsApp?</div>
+      <div class="modal-copy">This will disconnect and unlink the current WhatsApp session. You will need to connect again before the notifier can listen for messages.</div>
+      <div class="modal-actions">
+        <button class="modal-cancel-btn" id="cancelDisconnectBtn" onclick="closeDisconnectModal()">Cancel</button>
+        <button class="modal-disconnect-btn" id="confirmDisconnectBtn" onclick="confirmDisconnect()">Disconnect</button>
+      </div>
     </div>
   </div>
 
@@ -661,21 +789,36 @@ app.get("/", (req, res) => {
       poll();
     }
 
-    async function disconnectWhatsApp() {
-      if (!confirm("Disconnect and unlink this WhatsApp account?")) return;
-      const button = document.getElementById("disconnectBtn");
-      button.disabled = true;
-      button.textContent = "Disconnecting";
+    function openDisconnectModal() {
+      document.getElementById("disconnectModal").classList.add("open");
+      document.getElementById("confirmDisconnectBtn").focus();
+    }
+
+    function closeDisconnectModal() {
+      document.getElementById("disconnectModal").classList.remove("open");
+    }
+
+    async function confirmDisconnect() {
+      const disconnectButton = document.getElementById("disconnectBtn");
+      const confirmButton = document.getElementById("confirmDisconnectBtn");
+      const cancelButton = document.getElementById("cancelDisconnectBtn");
+      disconnectButton.disabled = true;
+      confirmButton.disabled = true;
+      cancelButton.disabled = true;
+      confirmButton.textContent = "Disconnecting";
       try {
         await fetch("/api/disconnect", { method: "POST" });
+        closeDisconnectModal();
       } catch (e) {
         document.getElementById("footerMsg").textContent = "Disconnect request failed";
         document.getElementById("footerMsg").className = "footer-msg error";
       } finally {
         isConnected = false;
         shouldPoll = true;
-        button.disabled = false;
-        button.textContent = "Disconnect";
+        disconnectButton.disabled = false;
+        confirmButton.disabled = false;
+        cancelButton.disabled = false;
+        confirmButton.textContent = "Disconnect";
         poll();
       }
     }
@@ -920,16 +1063,18 @@ client.on("message", async (msg) => {
 client.on("message_create", async (msg) => {
   try {
     if (!msg.hasQuotedMsg) return;
+
     const quoted = await msg.getQuotedMessage();
     const entry = replyMap.get(quoted.id.user);
     if (!entry) return;
-
-    if (msg.hasMedia) {
-      const media = await msg.downloadMedia();
-      await client.sendMessage(entry, media, { caption: msg.body || "" });
-    } else {
-      await client.sendMessage(entry, msg.body);
-      console.log("Reply forwarded to:", entry);
+    if (msg.to === MY_NUMBER && !numbersAllowed.includes(msg.from)) {
+      if (msg.hasMedia) {
+        const media = await msg.downloadMedia();
+        await client.sendMessage(entry, media, { caption: msg.body || "" });
+      } else {
+        await client.sendMessage(entry, msg.body);
+        console.log("Reply forwarded to:", entry);
+      }
     }
   } catch (err) {
     console.error("Reply error:", err);
@@ -976,6 +1121,12 @@ client.on("disconnected", (reason) => {
 const server = http.createServer(app);
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`UI available at http://localhost:${PORT}`);
+});
+
+// ─── Call ────────────────────────────────────────────────────────────────────
+client.on("call", async (call) => {
+  console.log("Incoming call from:", call.from);
+  // you can attempt to reject it
 });
 
 async function shutdown(signal) {
